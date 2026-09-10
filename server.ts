@@ -344,37 +344,43 @@ class MetaBridgePool {
     }
 
     // Poll for response tokens
-    const completionDeadline = Date.now() + 60000;
+    const completionDeadline = Date.now() + 90000;
     let fullText = '';
     let fullReasoning = '';
     let lastReportedLen = 0;
     let lastReportedReasoningLen = 0;
     let stableRounds = 0;
+    let sawGenerationStart = false;
 
     while (Date.now() < completionDeadline) {
       await page.waitForTimeout(400);
-      let state = { generating: false, answerText: '', reasoningText: '' };
+      let state = { generating: false, hasSendBtn: false, answerText: '', reasoningText: '' };
       try {
         state = await page.evaluate(() => {
-          const stopBtn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"], button[data-testid*="stop"]');
-          const msgs = document.querySelectorAll('[data-testid="assistant-message"], .markdown-content');
+          const stopBtn = document.querySelector('button[data-testid="composer-stop-button"], button[aria-label*="Stop"], button[aria-label*="stop"]');
+          const sendBtn = document.querySelector('button[data-testid="composer-send-button"], button[aria-label="Send"]');
+          const msgs = document.querySelectorAll('[data-testid="assistant-message"]');
           let lastMsg: Element | null = null;
           if (msgs.length > 0) {
             lastMsg = msgs[msgs.length - 1];
           }
-          if (!lastMsg) return { generating: !!stopBtn, answerText: '', reasoningText: '' };
+          if (!lastMsg) {
+            const fallback = document.querySelector('.markdown-content');
+            lastMsg = fallback;
+          }
+          if (!lastMsg) return { generating: !!stopBtn, hasSendBtn: !!sendBtn, answerText: '', reasoningText: '' };
 
           const thinkEl = lastMsg.querySelector('[class*="thought"], [class*="thinking"], [class*="reasoning"], [data-testid*="thought"], [data-testid*="thinking"], details, summary');
-          const proseEl = lastMsg.querySelector('.markdown-content, div[dir="auto"], div[class*="prose"]');
-
+          
           let reasoningText = thinkEl ? (thinkEl.textContent || '').trim() : '';
-          let answerText = proseEl ? (proseEl.textContent || '').trim() : (lastMsg.textContent || '').trim();
+          let answerText = (lastMsg.textContent || '').trim();
           if (thinkEl && answerText.includes(reasoningText)) {
             answerText = answerText.replace(reasoningText, '').trim();
           }
 
           return {
             generating: !!stopBtn,
+            hasSendBtn: !!sendBtn,
             answerText,
             reasoningText
           };
@@ -385,6 +391,11 @@ class MetaBridgePool {
           continue;
         }
         throw err;
+      }
+
+      if (state.generating) {
+        sawGenerationStart = true;
+        stableRounds = 0; // Reset while stop button is actively on screen
       }
 
       // Stream reasoning delta if present
@@ -403,10 +414,21 @@ class MetaBridgePool {
         if (options.onChunk) options.onChunk(delta, false);
       }
 
-      if (!state.generating && (fullText.length > 0 || fullReasoning.length > 0)) {
+      // Completion conditions:
+      // Case 1: Stop button was visible, and now is GONE, and send button is back
+      if (sawGenerationStart && !state.generating && state.hasSendBtn) {
+        if (state.answerText === fullText && (fullText.length > 0 || fullReasoning.length > 0)) {
+          stableRounds++;
+          if (stableRounds >= 3) break; // 3 cycles * 400ms = 1.2s after stop button completely gone
+        } else {
+          stableRounds = 0;
+          fullText = state.answerText;
+        }
+      } else if (!sawGenerationStart && !state.generating && fullText.length > 0) {
+        // Fallback if stop button was never caught (fast response or very short text)
         if (state.answerText === fullText) {
           stableRounds++;
-          if (stableRounds >= 2) break;
+          if (stableRounds >= 6) break; // Require 2.4s of stability
         } else {
           stableRounds = 0;
           fullText = state.answerText;
