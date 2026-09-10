@@ -16,12 +16,14 @@
 - **مکانیزم پیش‌گرمایش نشست مرورگر (Pre-Warming Session Engine):**  
   بارگذاری پیش‌دستانه صفحه Meta AI درون صف ران‌تایم بلافاصله پس از اجرای سرویس، جهت حذف تاخیر اولیه لود و پاسخ‌دهی فوری به نخستین درخواست‌های کاربر.
 
-- **پشتیبانی کامل از خانواده مدل‌های لاما و استدلال (Llama 3.3 & Thinking Mode):**  
+- **پشتیبانی کامل از خانواده مدل‌های پیشرفته Muse Spark و استدلال (Meta Superintelligence Labs):**  
   دسترسی مستقیم و تفکیک‌شده به مدل‌های:
+  - `meta/muse-spark-1.3`: ابرمدل پرچمدار سوپراینتلیجنس Meta با بالاترین توان استدلال
+  - `meta/muse-spark`: مدل مرزی استدلال چندحالته (Frontier Multimodal Reasoning)
+  - `meta/muse-code`: مدل تخصصی مهندسی نرم‌افزار، ایجنتیک و کدنویسی
+  - `meta/muse-glimmer`: مدل ۳۰ میلیاردی بهینه‌شده، سبک و فوق‌العاده سریع
+  - `meta/muse-spark-thinking`: سوییچ خودکار به حالت تفکر عمیق (Deep Thinking / Reasoning Mode)
   - `meta/meta-ai`: دستیار عمومی استاندارد Meta AI
-  - `meta/llama-3.3-70b`: مدل فوق‌سریع و هوشمند Llama 3.3 70B
-  - `meta/llama-3.1-405b`: ابرمدل پرچمدار ۴۰۵ میلیاردی Llama
-  - `meta/meta-ai-thinking`: سوییچ خودکار به حالت تفکر عمیق (Reasoning / Thinking Mode)
   - `meta/auto`: مسیریابی و چرخش خودکار مدل
 
 - **مدیریت هوشمند سقف کانتکست (Context Budgeting for AI Agents):**  

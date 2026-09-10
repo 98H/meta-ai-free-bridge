@@ -101,7 +101,7 @@ accounts.append({
     'tier': '$TIER',
     'storagePath': '$STORAGE_PATH',
     'enabled': True,
-    'models': ['meta-ai', 'llama-3.3-70b', 'llama-3.1-405b', 'meta-ai-thinking', 'auto']
+    'models': ['muse-spark-1.3', 'muse-spark', 'muse-code', 'muse-glimmer', 'muse-spark-thinking', 'meta-ai', 'auto']
 })
 with open(path, 'w', encoding='utf-8') as f:
     json.dump(accounts, f, indent=2)

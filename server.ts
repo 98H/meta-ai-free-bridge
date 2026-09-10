@@ -457,11 +457,13 @@ class MetaBridgePool {
 
   public async getAvailableModels(): Promise<Array<{ id: string; object: string; owned_by: string; description?: string }>> {
     return [
-      { id: 'meta-ai', object: 'model', owned_by: 'meta-ai', description: 'Meta AI Standard Assistant' },
-      { id: 'llama-3.3-70b', object: 'model', owned_by: 'meta-ai', description: 'Llama 3.3 70B Instruct' },
-      { id: 'llama-3.1-405b', object: 'model', owned_by: 'meta-ai', description: 'Llama 3.1 405B Flagship' },
-      { id: 'meta-ai-thinking', object: 'model', owned_by: 'meta-ai', description: 'Meta AI Reasoning / Thinking Mode' },
-      { id: 'auto', object: 'model', owned_by: 'meta-ai', description: 'Auto Model Routing' }
+      { id: 'muse-spark-1.3', object: 'model', owned_by: 'meta-ai', description: 'Muse Spark 1.3 Flagship Superintelligence Model' },
+      { id: 'muse-spark', object: 'model', owned_by: 'meta-ai', description: 'Muse Spark Frontier Reasoning Model' },
+      { id: 'muse-code', object: 'model', owned_by: 'meta-ai', description: 'Muse Code Dedicated Coding & Agent Model' },
+      { id: 'muse-glimmer', object: 'model', owned_by: 'meta-ai', description: 'Muse Glimmer Fast Multimodal Model' },
+      { id: 'muse-spark-thinking', object: 'model', owned_by: 'meta-ai', description: 'Muse Spark Deep Thinking / Reasoning Mode' },
+      { id: 'meta-ai', object: 'model', owned_by: 'meta-ai', description: 'Meta AI Standard Web Assistant' },
+      { id: 'auto', object: 'model', owned_by: 'meta-ai', description: 'Smart Auto Routing' }
     ];
   }
 
