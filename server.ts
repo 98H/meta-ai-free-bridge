@@ -175,23 +175,14 @@ class MetaBridgePool {
   private async dismissDialogs(page: Page) {
     try {
       await page.evaluate(() => {
-        // Try dismissing cookie dialogs, welcome banners, overlays
-        const selectors = [
-          'button:has-text("Accept all")',
-          'button:has-text("Accept")',
-          'button:has-text("Dismiss")',
-          'button:has-text("Got it")',
-          'button:has-text("Close")',
-          '[aria-label="Close"]',
-          '[data-testid="close-button"]'
-        ];
-        for (const sel of selectors) {
-          try {
-            const btn = document.querySelector(sel) as HTMLElement;
-            if (btn && btn.offsetParent !== null) {
-              btn.click();
-            }
-          } catch {}
+        const textToDismiss = ['accept all', 'accept', 'dismiss', 'got it', 'close'];
+        const allButtons = Array.from(document.querySelectorAll('button, [role="button"], [aria-label="Close"], [data-testid="close-button"]'));
+        for (const el of allButtons) {
+          const t = (el.innerText || el.textContent || '').trim().toLowerCase();
+          const label = (el.getAttribute('aria-label') || '').toLowerCase();
+          if (textToDismiss.some(td => t.includes(td) || label.includes(td))) {
+            try { (el as HTMLElement).click(); } catch {}
+          }
         }
       });
     } catch {}
@@ -288,9 +279,13 @@ class MetaBridgePool {
 
     // Reset to new conversation if not on a clean home page
     await page.evaluate(() => {
-      const newChatBtn = document.querySelector('button[aria-label="New chat"], a[href="/"], button:has-text("New chat")') as HTMLElement;
-      if (newChatBtn) newChatBtn.click();
-    });
+      const btn = Array.from(document.querySelectorAll('button, a')).find(el => {
+        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+        const label = (el.getAttribute('aria-label') || '').toLowerCase();
+        return text.includes('new chat') || label.includes('new chat') || el.getAttribute('href') === '/';
+      }) as HTMLElement | undefined;
+      if (btn) btn.click();
+    }).catch(() => {});
     await page.waitForTimeout(500);
 
     // Switch mode if model specifies thinking
@@ -298,12 +293,14 @@ class MetaBridgePool {
       await page.evaluate(() => {
         const modeBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText?.includes('Instant') || b.innerText?.includes('Thinking'));
         if (modeBtn) modeBtn.click();
-      });
+      }).catch(() => {});
       await page.waitForTimeout(300);
       await page.evaluate(() => {
-        const item = document.querySelector('[role="menuitemcheckbox"]:has-text("Thinking"), button:has-text("Thinking")') as HTMLElement;
+        const item = Array.from(document.querySelectorAll('[role="menuitemcheckbox"], button')).find(el => {
+          return (el.innerText || el.textContent || '').includes('Thinking');
+        }) as HTMLElement | undefined;
         if (item) item.click();
-      });
+      }).catch(() => {});
       await page.waitForTimeout(300);
     }
 
