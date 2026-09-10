@@ -1,0 +1,7 @@
+node_modules/
+accounts/*.json
+!accounts.example.json
+accounts.json
+.env
+*.log
+.DS_Store

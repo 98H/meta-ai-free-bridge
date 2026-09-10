@@ -1,0 +1,9 @@
+[
+  {
+    "id": "meta-account-1",
+    "name": "Meta AI Personal",
+    "tier": "free",
+    "storagePath": "/root/projects/meta-ai-free-bridge/accounts/meta-account-1_storage.json",
+    "enabled": true
+  }
+]

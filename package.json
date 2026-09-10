@@ -1,0 +1,26 @@
+{
+  "name": "meta-ai-free-bridge",
+  "version": "1.0.0",
+  "description": "Turnkey, Production-Ready, Headless Web-to-API Gateway for Meta AI (meta.ai & Llama models)",
+  "main": "server.ts",
+  "scripts": {
+    "start": "bun run server.ts",
+    "test": "./test-bridge.sh"
+  },
+  "keywords": [
+    "meta",
+    "meta-ai",
+    "llama",
+    "llama-3.3",
+    "meta-ai-bridge",
+    "openai-compatible",
+    "9router",
+    "reverse-proxy",
+    "ai-gateway"
+  ],
+  "author": "98H",
+  "license": "MIT",
+  "dependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}
