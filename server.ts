@@ -91,6 +91,7 @@ class MetaBridgePool {
     });
 
     console.log('[meta-bridge] Browser engine launched successfully.');
+    await this.syncFrom9RouterDB();
     await this.reloadAccounts();
     console.log('[meta-bridge] Multi-account pool initialized with', this.pool.size, 'account(s).');
 
@@ -277,87 +278,45 @@ class MetaBridgePool {
     const page = await this.getAccountSession(session);
     await this.dismissDialogs(page);
 
-    // Reset to new conversation if not on a clean home page
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button, a')).find(el => {
-        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-        const label = (el.getAttribute('aria-label') || '').toLowerCase();
-        return text.includes('new chat') || label.includes('new chat') || el.getAttribute('href') === '/';
-      }) as HTMLElement | undefined;
-      if (btn) btn.click();
-    }).catch(() => {});
-    await page.waitForTimeout(500);
-
-    // Switch mode if model specifies thinking
+    // If Thinking mode requested, toggle it if button is available
+    let effectivePrompt = promptText;
     if (options.model && /thinking|reason/i.test(options.model)) {
-      await page.evaluate(() => {
-        const modeBtn = Array.from(document.querySelectorAll('button')).find(b => b.innerText?.includes('Instant') || b.innerText?.includes('Thinking'));
-        if (modeBtn) modeBtn.click();
-      }).catch(() => {});
-      await page.waitForTimeout(300);
-      await page.evaluate(() => {
-        const item = Array.from(document.querySelectorAll('[role="menuitemcheckbox"], button')).find(el => {
-          return (el.innerText || el.textContent || '').includes('Thinking');
-        }) as HTMLElement | undefined;
-        if (item) item.click();
-      }).catch(() => {});
-      await page.waitForTimeout(300);
+      try {
+        const modeBtn = page.locator('button').filter({ hasText: /Instant|Thinking/ }).first();
+        if (await modeBtn.isVisible().catch(() => false)) {
+          await modeBtn.click();
+          await page.waitForTimeout(300);
+          const thinkingItem = page.locator('[role="menuitemcheckbox"]').filter({ hasText: /Thinking/ }).first();
+          if (await thinkingItem.isVisible().catch(() => false)) {
+            await thinkingItem.click();
+            await page.waitForTimeout(300);
+          }
+        }
+      } catch {}
     }
 
     // Locate composer input
-    const composer = page.locator('input[aria-label*="Ask Meta AI"], input[placeholder*="Ask Meta AI"], textarea[data-testid="composer-input"], div[data-testid="composer-input"] [contenteditable], textarea, input[type="text"]')
-      .filter({ visible: true })
-      .first();
+    const composer = page.locator('textarea, [contenteditable="true"]').filter({ visible: true }).first();
     await composer.waitFor({ state: 'visible', timeout: 20000 });
+    await composer.focus();
+    await page.waitForTimeout(200);
 
+    // Type prompt text using Playwright keyboard (triggers genuine Lexical/React input events)
+    await page.keyboard.insertText(effectivePrompt);
+    await page.waitForTimeout(300);
+
+    // Count initial assistant messages
     const initialAssistantCount = await page.evaluate(() => {
-      return document.querySelectorAll('[class*="assistant-message"], [data-message-author-role="assistant"]').length;
+      return document.querySelectorAll('[data-testid="assistant-message"], .markdown-content').length;
     });
 
-    // Type prompt text
-    await composer.evaluate((el: HTMLElement, val: string) => {
-      el.focus();
-      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) {
-        const input = el as HTMLInputElement;
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          el instanceof HTMLInputElement ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype,
-          'value'
-        )?.set;
-        if (nativeSetter) nativeSetter.call(input, val);
-        else input.value = val;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-      } else {
-        el.textContent = val;
-        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: val }));
-      }
-    }, promptText);
-
-    await page.waitForTimeout(400);
-
-    // Fallback insertText if value didn't latch
-    const isValSet = await composer.evaluate((el: HTMLElement) => {
-      return (el as any).value?.length > 0 || (el.textContent || '').length > 0;
-    });
-    if (!isValSet) {
-      await composer.focus();
-      await page.keyboard.insertText(promptText);
-      await page.waitForTimeout(300);
-    }
-
-    // Click Send button
-    const sendButtonSelector = 'button[aria-label="Send"], button[data-testid*="send"], button:has-text("Send")';
+    // Click Send button with trusted CDP click
     let clicked = false;
     try {
-      const sendBtn = page.locator(sendButtonSelector).filter({ visible: true }).first();
-      await sendBtn.waitFor({ state: 'visible', timeout: 4000 });
-      clicked = await sendBtn.evaluate((b: HTMLButtonElement) => {
-        if (!b.disabled) {
-          b.click();
-          return true;
-        }
-        return false;
-      });
+      const sendBtn = page.locator('button[data-testid="composer-send-button"], button[aria-label="Send"]').filter({ visible: true }).first();
+      await sendBtn.waitFor({ state: 'visible', timeout: 3000 });
+      await sendBtn.click();
+      clicked = true;
     } catch {}
 
     if (!clicked) {
@@ -365,35 +324,23 @@ class MetaBridgePool {
       await page.keyboard.press('Enter');
     }
 
-    // Wait for generation start
+    // Wait for generation start (either stop button appears or new message appears)
     const startDeadline = Date.now() + 15000;
-    let started = false;
     while (Date.now() < startDeadline) {
-      await page.waitForTimeout(500);
-      const state = await page.evaluate(() => {
-        const msgs = document.querySelectorAll('[class*="assistant-message"], [data-message-author-role="assistant"]');
-        const stopBtn = document.querySelector('button[aria-label*="Stop"], button[data-testid*="stop"]');
-        const lastMsg = msgs[msgs.length - 1];
-        const hasText = lastMsg && (lastMsg.innerText || lastMsg.textContent || '').trim().length > 0;
+      await page.waitForTimeout(400);
+      const state = await page.evaluate((initCount) => {
+        const msgs = document.querySelectorAll('[data-testid="assistant-message"], .markdown-content');
+        const stopBtn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"], button[data-testid*="stop"]');
         return {
           count: msgs.length,
           hasStopBtn: !!stopBtn,
-          hasText: !!hasText
+          hasNewMsg: msgs.length > initCount
         };
-      });
-      if (state.count > initialAssistantCount || state.hasStopBtn || (state.count > 0 && state.hasText)) {
-        started = true;
+      }, initialAssistantCount);
+
+      if (state.hasStopBtn || state.hasNewMsg) {
         break;
       }
-    }
-
-    if (!started) {
-      // Try Enter key fallback one more time
-      try {
-        await composer.focus();
-        await page.keyboard.press('Enter');
-        await page.waitForTimeout(1500);
-      } catch {}
     }
 
     // Poll for response tokens
@@ -403,23 +350,20 @@ class MetaBridgePool {
     let stableRounds = 0;
 
     while (Date.now() < completionDeadline) {
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(400);
       let state = { generating: false, text: '' };
       try {
         state = await page.evaluate(() => {
-          const stopBtn = document.querySelector('button[aria-label*="Stop"], button[data-testid*="stop"]');
-          const msgs = document.querySelectorAll('[class*="assistant-message"], [data-message-author-role="assistant"], div[dir="auto"]');
+          const stopBtn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"], button[data-testid*="stop"]');
+          const msgs = document.querySelectorAll('[data-testid="assistant-message"], .markdown-content');
           let lastMsg: Element | null = null;
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const t = (msgs[i].textContent || '').trim();
-            if (t.length > 5 && !t.includes('Ask Meta AI') && !t.includes('Where should we start')) {
-              lastMsg = msgs[i];
-              break;
-            }
+          if (msgs.length > 0) {
+            lastMsg = msgs[msgs.length - 1];
           }
+          const rawText = lastMsg ? (lastMsg.textContent || '').trim() : '';
           return {
             generating: !!stopBtn,
-            text: lastMsg ? (lastMsg.textContent || '').trim() : ''
+            text: rawText
           };
         });
       } catch (err: any) {
@@ -446,6 +390,14 @@ class MetaBridgePool {
           fullText = state.text;
         }
       }
+    }
+
+    // If fullText is still empty, grab last message as fallback
+    if (!fullText) {
+      fullText = await page.evaluate(() => {
+        const msgs = document.querySelectorAll('[data-testid="assistant-message"], .markdown-content');
+        return msgs.length > 0 ? (msgs[msgs.length - 1].textContent || '').trim() : '';
+      });
     }
 
     try {
@@ -524,11 +476,17 @@ class MetaBridgePool {
 import sqlite3, json
 conn = sqlite3.connect('${dbPath}')
 c = conn.cursor()
-c.execute("SELECT id, name, apiKey, enabled FROM providerConnections WHERE provider = 'openai-compatible-chat-meta'")
+c.execute("SELECT id, name, email, isActive, data FROM providerConnections WHERE provider = 'openai-compatible-chat-meta'")
 rows = c.fetchall()
 out = []
 for r in rows:
-    out.append({'id': r[0], 'name': r[1], 'apiKey': r[2], 'enabled': bool(r[3])})
+    data_obj = {}
+    try:
+        data_obj = json.loads(r[4] or '{}')
+    except:
+        pass
+    api_key = data_obj.get('apiKey') or data_obj.get('token') or ''
+    out.append({'id': r[0], 'name': r[1] or r[2] or 'Meta AI Account', 'apiKey': api_key, 'enabled': bool(r[3])})
 print(json.dumps(out))
       `], { encoding: 'utf-8', timeout: 5000 });
 
@@ -542,18 +500,22 @@ print(json.dumps(out))
       let changed = false;
       for (const conn of dbConns) {
         let existing = localAccounts.find(a => a.id === conn.id);
-        if (!existing && conn.apiKey) {
+        if (conn.apiKey && (!existing || existing.enabled !== conn.enabled)) {
           const valRes = validateSessionToken(conn.apiKey);
           const storagePath = path.join(ACCOUNTS_DIR, `${conn.id}_storage.json`);
-          if (valRes.cookies) {
+          if (valRes.cookies && valRes.cookies.length > 0) {
             fs.writeFileSync(storagePath, JSON.stringify({ cookies: valRes.cookies, origins: [] }, null, 2));
-            localAccounts.push({
-              id: conn.id,
-              name: conn.name || 'Meta AI Account',
-              tier: 'free',
-              storagePath,
-              enabled: conn.enabled
-            });
+            if (!existing) {
+              localAccounts.push({
+                id: conn.id,
+                name: conn.name || 'Meta AI Account',
+                tier: 'free',
+                storagePath,
+                enabled: conn.enabled
+              });
+            } else {
+              existing.enabled = conn.enabled;
+            }
             changed = true;
           }
         }
