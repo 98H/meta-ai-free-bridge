@@ -352,10 +352,11 @@ class MetaBridgePool {
     let lastReportedReasoningLen = 0;
     let stableRounds = 0;
     let sawGenerationStart = false;
+    let answerPhaseStarted = false;
 
     while (Date.now() < completionDeadline) {
       await page.waitForTimeout(400);
-      let state = { generating: false, hasSendBtn: false, answerText: '', reasoningText: '' };
+      let state = { generating: false, hasSendBtn: false, isThinking: false, hasShowThinking: false, isShowThinkingOnly: false, answerText: '', reasoningText: '' };
       try {
         state = await page.evaluate(() => {
           const stopBtn = document.querySelector('button[data-testid="composer-stop-button"], button[aria-label*="Stop"], button[aria-label*="stop"]');
@@ -369,37 +370,50 @@ class MetaBridgePool {
             const fallback = document.querySelector('.markdown-content');
             lastMsg = fallback;
           }
-          if (!lastMsg) return { generating: !!stopBtn, hasSendBtn: !!sendBtn, answerText: '', reasoningText: '' };
+          if (!lastMsg) return { generating: !!stopBtn, hasSendBtn: !!sendBtn, isThinking: false, hasShowThinking: false, isShowThinkingOnly: false, answerText: '', reasoningText: '' };
 
-          // 1. Extract clean answer content from the message body
-          // The actual reply on meta.ai is inside .mt-4, .ur-markdown, or prose elements
-          const bodyEl = lastMsg.querySelector('.mt-4, .ur-markdown, div.prose');
+          // 1. Inspect header (Child 0) to detect thinking lifecycle
+          const child0 = lastMsg.children[0] as HTMLElement | undefined;
+          const child0Text = child0 ? (child0.innerText || '').trim() : '';
+          const hasOrbitIcon = !!lastMsg.querySelector('img[src*="orbit"], svg circle, [data-testid*="thinking"]');
+
+          // "Show thinking" only appears once reasoning is completely finished
+          const isShowThinkingOnly = child0Text.toLowerCase() === 'show thinking';
+          const hasShowThinking = isShowThinkingOnly || child0Text.toLowerCase().includes('show thinking');
+
+          // Thinking phase is active if orbit icon or thinking status is present and "Show thinking" hasn't taken over exclusively
+          const isThinking = !isShowThinkingOnly && (hasOrbitIcon || (child0Text.length > 0 && !hasShowThinking));
+
+          // 2. Extract clean text from prose container (.mt-4)
+          const bodyEl = lastMsg.querySelector('.mt-4, .ur-markdown, div.prose') as HTMLElement | null;
           let rawText = '';
           if (bodyEl) {
-            rawText = ((bodyEl as HTMLElement).innerText || '').trim();
+            rawText = (bodyEl.innerText || '').trim();
           } else {
             rawText = ((lastMsg as HTMLElement).innerText || '').trim();
           }
 
-          // Strip any UI status chips, language pills, and citations
+          // Strip any residual UI status chips, language pills, and citations
           rawText = rawText.replace(/^Show thinking\s*/i, '');
           rawText = rawText.replace(/^Responding in [^\n]+\s*/i, '');
-          rawText = rawText.replace(/Sources\s*$/i, '');
-          let answerText = rawText.trim();
+          rawText = rawText.replace(/Sources\s*$/i, '').trim();
 
-          // 2. Only extract reasoning if there is actual substantive thinking text (not UI status labels)
           let reasoningText = '';
-          const thinkEl = lastMsg.querySelector('[data-testid="thinking-status"] + div, details[open] > *:not(summary)');
-          if (thinkEl) {
-            const candidate = ((thinkEl as HTMLElement).innerText || '').trim();
-            if (candidate.length > 25 && !/^(show thinking|thinking|responding in)/i.test(candidate)) {
-              reasoningText = candidate;
-            }
+          let answerText = '';
+
+          if (isThinking) {
+            reasoningText = rawText;
+          } else if (isShowThinkingOnly || (!hasOrbitIcon && child0Text.length === 0)) {
+            // Definitively the answer phase
+            answerText = rawText;
           }
 
           return {
             generating: !!stopBtn,
             hasSendBtn: !!sendBtn,
+            isThinking,
+            hasShowThinking,
+            isShowThinkingOnly,
             answerText,
             reasoningText
           };
@@ -417,20 +431,38 @@ class MetaBridgePool {
         stableRounds = 0; // Reset while stop button is actively on screen
       }
 
-      // Stream reasoning delta if present
-      if (state.reasoningText.length > lastReportedReasoningLen) {
-        const delta = state.reasoningText.slice(lastReportedReasoningLen);
-        lastReportedReasoningLen = state.reasoningText.length;
-        fullReasoning = state.reasoningText;
-        if (options.onChunk) options.onChunk(delta, true);
+      // 1. Stream reasoning delta during thinking phase
+      if (state.isThinking && state.reasoningText) {
+        if (state.reasoningText.length < lastReportedReasoningLen) {
+          lastReportedReasoningLen = 0;
+          fullReasoning += '\n';
+        }
+        if (state.reasoningText.length > lastReportedReasoningLen) {
+          const delta = state.reasoningText.slice(lastReportedReasoningLen);
+          lastReportedReasoningLen = state.reasoningText.length;
+          fullReasoning += delta;
+          if (options.onChunk) options.onChunk(delta, true);
+        }
       }
 
-      // Stream answer delta
-      if (state.answerText.length > lastReportedLen) {
-        const delta = state.answerText.slice(lastReportedLen);
-        lastReportedLen = state.answerText.length;
-        fullText = state.answerText;
-        if (options.onChunk) options.onChunk(delta, false);
+      // 2. Stream answer delta during answer phase
+      if (state.answerText) {
+        if (!answerPhaseStarted) {
+          answerPhaseStarted = true;
+          lastReportedLen = 0; // Reset offset cleanly for answer prose
+        }
+
+        // If body text shrank or reset, reset offset to prevent mid-word slicing
+        if (state.answerText.length < lastReportedLen) {
+          lastReportedLen = 0;
+        }
+
+        if (state.answerText.length > lastReportedLen) {
+          const delta = state.answerText.slice(lastReportedLen);
+          lastReportedLen = state.answerText.length;
+          fullText = state.answerText;
+          if (options.onChunk) options.onChunk(delta, false);
+        }
       }
 
       // Completion conditions:
@@ -441,7 +473,7 @@ class MetaBridgePool {
           if (stableRounds >= 3) break; // 3 cycles * 400ms = 1.2s after stop button completely gone
         } else {
           stableRounds = 0;
-          fullText = state.answerText;
+          if (state.answerText) fullText = state.answerText;
         }
       } else if (!sawGenerationStart && !state.generating && fullText.length > 0) {
         // Fallback if stop button was never caught (fast response or very short text)
@@ -450,16 +482,21 @@ class MetaBridgePool {
           if (stableRounds >= 6) break; // Require 2.4s of stability
         } else {
           stableRounds = 0;
-          fullText = state.answerText;
+          if (state.answerText) fullText = state.answerText;
         }
       }
     }
 
-    // If fullText is still empty, grab last message as fallback
+    // If fullText is still empty, grab last message body as fallback
     if (!fullText) {
       fullText = await page.evaluate(() => {
         const msgs = document.querySelectorAll('[data-testid="assistant-message"], .markdown-content');
-        return msgs.length > 0 ? (msgs[msgs.length - 1].textContent || '').trim() : '';
+        if (msgs.length === 0) return '';
+        const last = msgs[msgs.length - 1];
+        const bodyEl = last.querySelector('.mt-4, .ur-markdown, div.prose') as HTMLElement | null;
+        let t = bodyEl ? (bodyEl.innerText || '').trim() : (last.textContent || '').trim();
+        t = t.replace(/^Show thinking\s*/i, '').replace(/^Responding in [^\n]+\s*/i, '').replace(/Sources\s*$/i, '').trim();
+        return t;
       });
     }
 
