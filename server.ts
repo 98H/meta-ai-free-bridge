@@ -2,6 +2,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
+import { createHash } from 'crypto';
 
 process.on('uncaughtException', (err) => {
   console.error('[meta-bridge] Uncaught exception:', err);
@@ -17,6 +18,8 @@ const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/
 const PROJECT_DIR = '/root/projects/meta-ai-free-bridge';
 const ACCOUNTS_FILE = path.join(PROJECT_DIR, 'accounts.json');
 const ACCOUNTS_DIR = path.join(PROJECT_DIR, 'accounts');
+
+const sessionValidationCache = new Map<string, { ts: number; res: any }>();
 
 export function validateSessionToken(token: string): {
   valid: boolean;
@@ -574,6 +577,75 @@ print(json.dumps(out))
     };
   }
 
+  public async validateSessionLive(token: string): Promise<{
+    valid: boolean;
+    user?: { id: string; name: string; email: string };
+    planType?: string;
+    cookies?: any[];
+    error?: string;
+  }> {
+    const parseRes = validateSessionToken(token);
+    if (!parseRes.valid) {
+      return { valid: false, error: parseRes.error || 'Token is malformed or too short' };
+    }
+
+    if (!this.browser) {
+      return { valid: false, error: 'Browser engine not available' };
+    }
+
+    const tokenHash = createHash('sha256').update(token.trim()).digest('hex');
+    const cached = sessionValidationCache.get(tokenHash);
+    if (cached && Date.now() - cached.ts < 300000) {
+      return cached.res;
+    }
+
+    let context: BrowserContext | null = null;
+    try {
+      context = await this.browser.newContext({
+        userAgent: USER_AGENT,
+        viewport: { width: 1280, height: 800 }
+      });
+
+      if (parseRes.cookies && parseRes.cookies.length > 0) {
+        await context.addCookies(parseRes.cookies as any);
+      }
+
+      const page = await context.newPage();
+      await page.goto('https://www.meta.ai/', {
+        waitUntil: 'domcontentloaded',
+        timeout: 15000
+      });
+
+      // Wait a moment for dynamic auth hydration
+      await Promise.race([
+        page.waitForLoadState('networkidle').catch(() => {}),
+        page.waitForTimeout(4000)
+      ]);
+
+      const bodyText = await page.evaluate(() => document.body.innerText || '');
+      const isLoggedOut = bodyText.includes('Log in') || bodyText.includes('Sign up');
+
+      const result = {
+        valid: !isLoggedOut,
+        user: parseRes.user,
+        planType: 'free',
+        cookies: parseRes.cookies,
+        error: isLoggedOut
+          ? 'Authentication failed: Meta AI shows unauthenticated login page. Please ensure you copied a valid, active session token from a logged-in session.'
+          : undefined
+      };
+
+      sessionValidationCache.set(tokenHash, { ts: Date.now(), res: result });
+      return result;
+    } catch (err: any) {
+      return { valid: false, error: `Upstream validation error: ${err.message}` };
+    } finally {
+      if (context) {
+        await context.close().catch(() => {});
+      }
+    }
+  }
+
   public getAccountsInfo() {
     const accs = Array.from(this.pool.values()).map(a => ({
       id: a.config.id,
@@ -660,7 +732,7 @@ Bun.serve({
         const body: any = await req.json();
         const token = body.token || body.apiKey;
         if (!token) return Response.json({ valid: false, error: 'Token is required' }, { status: 400, headers: corsHeaders });
-        const valRes = validateSessionToken(token);
+        const valRes = await pool.validateSessionLive(token);
         return Response.json(valRes, { status: valRes.valid ? 200 : 401, headers: corsHeaders });
       } catch (err: any) {
         return Response.json({ valid: false, error: err.message }, { status: 500, headers: corsHeaders });
@@ -687,7 +759,7 @@ Bun.serve({
               }
             }, { status: 401, headers: corsHeaders });
           }
-          const testRes = validateSessionToken(probeToken);
+          const testRes = await pool.validateSessionLive(probeToken);
           if (!testRes.valid) {
             return Response.json({
               error: {
