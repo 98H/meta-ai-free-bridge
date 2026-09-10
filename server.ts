@@ -656,9 +656,10 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-// Start Bun HTTP Server
+// Bun HTTP Server
 Bun.serve({
   port: PORT,
+  idleTimeout: 0, // CRITICAL: Prevent socket timeout on long reasoning generations
   async fetch(req) {
     const url = new URL(req.url);
 
@@ -754,26 +755,30 @@ Bun.serve({
         if (messages.length === 1) {
           promptText = typeof messages[0].content === 'string' ? messages[0].content : JSON.stringify(messages[0].content);
         } else {
-          const MAX_CHARS = 35000;
-          let formatted = messages.map(m => {
-            const text = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-            return `${m.role.toUpperCase()}:\n${text}`;
-          });
-
-          let totalLen = formatted.reduce((acc, str) => acc + str.length, 0);
-          if (totalLen > MAX_CHARS && messages.length > 2) {
-            const first = formatted[0];
-            let currentLen = first.length;
-            const remaining = formatted.slice(1);
-            const pickedBackwards: string[] = [];
-            for (let i = remaining.length - 1; i >= 0; i--) {
-              if (currentLen + remaining[i].length > MAX_CHARS && pickedBackwards.length >= 2) break;
-              pickedBackwards.unshift(remaining[i]);
-              currentLen += remaining[i].length;
+          const MAX_CHARS = 14000;
+          let systemPrompt = '';
+          const turns: string[] = [];
+          for (const m of messages) {
+            const role = (m.role || 'user').toUpperCase();
+            const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
+            if (m.role === 'system' && !systemPrompt) {
+              systemPrompt = `System: ${content}\n\n`;
+            } else {
+              turns.push(`${role}: ${content}`);
             }
-            formatted = [first, ...pickedBackwards];
           }
-          promptText = formatted.join('\n\n');
+          let totalChars = systemPrompt.length;
+          const keptTurns: string[] = [];
+          for (let i = turns.length - 1; i >= 0; i--) {
+            const t = turns[i];
+            if (totalChars + t.length <= MAX_CHARS || keptTurns.length === 0) {
+              keptTurns.unshift(t);
+              totalChars += t.length;
+            } else {
+              break;
+            }
+          }
+          promptText = (systemPrompt + keptTurns.join('\n\n')).trim();
         }
 
         const id = `chatcmpl-${Math.random().toString(36).slice(2, 11)}`;
