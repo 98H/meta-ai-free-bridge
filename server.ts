@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawnSync } from 'child_process';
 import { createHash } from 'crypto';
+import { formatMessagesWithTools, parseToolCalls } from './tool_emulation';
 
 process.on('uncaughtException', (err) => {
   console.error('[meta-bridge] Uncaught exception:', err);
@@ -809,39 +810,12 @@ Bun.serve({
       try {
         const body: any = await req.json();
         const messages: Array<{ role: string; content: any }> = body.messages || [];
+        const tools: Array<any> = body.tools || [];
         const stream = !!body.stream;
         const requestedModel = body.model;
         const explicitAccountId = req.headers.get('x-account-id') || undefined;
 
-        let promptText = '';
-        if (messages.length === 1) {
-          promptText = typeof messages[0].content === 'string' ? messages[0].content : JSON.stringify(messages[0].content);
-        } else {
-          const MAX_CHARS = 14000;
-          let systemPrompt = '';
-          const turns: string[] = [];
-          for (const m of messages) {
-            const role = (m.role || 'user').toUpperCase();
-            const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-            if (m.role === 'system' && !systemPrompt) {
-              systemPrompt = `System: ${content}\n\n`;
-            } else {
-              turns.push(`${role}: ${content}`);
-            }
-          }
-          let totalChars = systemPrompt.length;
-          const keptTurns: string[] = [];
-          for (let i = turns.length - 1; i >= 0; i--) {
-            const t = turns[i];
-            if (totalChars + t.length <= MAX_CHARS || keptTurns.length === 0) {
-              keptTurns.unshift(t);
-              totalChars += t.length;
-            } else {
-              break;
-            }
-          }
-          promptText = (systemPrompt + keptTurns.join('\n\n')).trim();
-        }
+        const promptText = formatMessagesWithTools(messages, tools, 14000);
 
         const id = `chatcmpl-${Math.random().toString(36).slice(2, 11)}`;
         const created = Math.floor(Date.now() / 1000);
@@ -864,33 +838,109 @@ Bun.serve({
 
           (async () => {
             try {
+              let streamedRaw = '';
+              let toolTagSeen = false;
+
               const result = await pool.ask(promptText, {
                 model: requestedModel,
                 accountId: explicitAccountId,
                 onChunk: async (delta, isThinking) => {
-                  const chunk = {
+                  if (isThinking) {
+                    const chunk = {
+                      id,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model: requestedModel || 'meta-ai',
+                      choices: [{
+                        index: 0,
+                        delta: { reasoning_content: delta },
+                        finish_reason: null
+                      }]
+                    };
+                    await safeWrite(`data: ${JSON.stringify(chunk)}\n\n`);
+                    return;
+                  }
+
+                  streamedRaw += delta;
+                  if (streamedRaw.includes('<tool_call>')) {
+                    toolTagSeen = true;
+                  }
+
+                  // If not inside tool_call tag, stream content normally
+                  if (!toolTagSeen) {
+                    const chunk = {
+                      id,
+                      object: 'chat.completion.chunk',
+                      created,
+                      model: requestedModel || 'meta-ai',
+                      choices: [{
+                        index: 0,
+                        delta: { content: delta },
+                        finish_reason: null
+                      }]
+                    };
+                    await safeWrite(`data: ${JSON.stringify(chunk)}\n\n`);
+                  }
+                }
+              });
+
+              // End of stream: parse tool calls
+              const { content: cleanContent, tool_calls } = parseToolCalls(result.text);
+              const hasToolCalls = tool_calls.length > 0;
+
+              if (hasToolCalls) {
+                const tcChunk = {
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: requestedModel || 'meta-ai',
+                  choices: [{
+                    index: 0,
+                    delta: {
+                      role: 'assistant',
+                      tool_calls: tool_calls.map((tc, idx) => ({
+                        index: idx,
+                        id: tc.id,
+                        type: 'function',
+                        function: tc.function
+                      }))
+                    },
+                    finish_reason: null
+                  }]
+                };
+                await safeWrite(`data: ${JSON.stringify(tcChunk)}\n\n`);
+
+                const finalChunk = {
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: requestedModel || 'meta-ai',
+                  choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }]
+                };
+                await safeWrite(`data: ${JSON.stringify(finalChunk)}\n\n`);
+              } else {
+                // If tag was false alarm, flush clean content
+                if (toolTagSeen && cleanContent) {
+                  const remainingContentChunk = {
                     id,
                     object: 'chat.completion.chunk',
                     created,
                     model: requestedModel || 'meta-ai',
-                    choices: [{
-                      index: 0,
-                      delta: isThinking ? { reasoning_content: delta } : { content: delta },
-                      finish_reason: null
-                    }]
+                    choices: [{ index: 0, delta: { content: cleanContent }, finish_reason: null }]
                   };
-                  await safeWrite(`data: ${JSON.stringify(chunk)}\n\n`);
+                  await safeWrite(`data: ${JSON.stringify(remainingContentChunk)}\n\n`);
                 }
-              });
 
-              const finalChunk = {
-                id,
-                object: 'chat.completion.chunk',
-                created,
-                model: requestedModel || 'meta-ai',
-                choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-              };
-              await safeWrite(`data: ${JSON.stringify(finalChunk)}\n\n`);
+                const finalChunk = {
+                  id,
+                  object: 'chat.completion.chunk',
+                  created,
+                  model: requestedModel || 'meta-ai',
+                  choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
+                };
+                await safeWrite(`data: ${JSON.stringify(finalChunk)}\n\n`);
+              }
+
               await safeWrite('data: [DONE]\n\n');
             } catch (err: any) {
               const errChunk = {
@@ -922,6 +972,20 @@ Bun.serve({
             accountId: explicitAccountId
           });
 
+          const { content: cleanContent, tool_calls } = parseToolCalls(result.text);
+          const hasToolCalls = tool_calls.length > 0;
+
+          const message: any = {
+            role: 'assistant',
+            content: cleanContent
+          };
+          if (result.reasoning) {
+            message.reasoning_content = result.reasoning;
+          }
+          if (hasToolCalls) {
+            message.tool_calls = tool_calls;
+          }
+
           return Response.json({
             id,
             object: 'chat.completion',
@@ -930,12 +994,8 @@ Bun.serve({
             choices: [
               {
                 index: 0,
-                message: {
-                  role: 'assistant',
-                  content: result.text,
-                  ...(result.reasoning ? { reasoning_content: result.reasoning } : {})
-                },
-                finish_reason: 'stop'
+                message,
+                finish_reason: hasToolCalls ? 'tool_calls' : 'stop'
               }
             ],
             usage: {
