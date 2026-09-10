@@ -270,8 +270,8 @@ class MetaBridgePool {
 
   public async ask(
     promptText: string,
-    options: { model?: string; accountId?: string; onChunk?: (delta: string) => void } = {}
-  ): Promise<{ text: string; account: AccountConfig }> {
+    options: { model?: string; accountId?: string; onChunk?: (delta: string, isThinking?: boolean) => void } = {}
+  ): Promise<{ text: string; reasoning?: string; account: AccountConfig }> {
     const session = this.selectAccount(options.model, options.accountId);
     console.log(`[meta-bridge] Routing request to account: "${session.config.name}" (${session.config.tier})`);
 
@@ -346,12 +346,14 @@ class MetaBridgePool {
     // Poll for response tokens
     const completionDeadline = Date.now() + 60000;
     let fullText = '';
+    let fullReasoning = '';
     let lastReportedLen = 0;
+    let lastReportedReasoningLen = 0;
     let stableRounds = 0;
 
     while (Date.now() < completionDeadline) {
       await page.waitForTimeout(400);
-      let state = { generating: false, text: '' };
+      let state = { generating: false, answerText: '', reasoningText: '' };
       try {
         state = await page.evaluate(() => {
           const stopBtn = document.querySelector('button[aria-label*="Stop"], button[aria-label*="stop"], button[data-testid*="stop"]');
@@ -360,10 +362,21 @@ class MetaBridgePool {
           if (msgs.length > 0) {
             lastMsg = msgs[msgs.length - 1];
           }
-          const rawText = lastMsg ? (lastMsg.textContent || '').trim() : '';
+          if (!lastMsg) return { generating: !!stopBtn, answerText: '', reasoningText: '' };
+
+          const thinkEl = lastMsg.querySelector('[class*="thought"], [class*="thinking"], [class*="reasoning"], [data-testid*="thought"], [data-testid*="thinking"], details, summary');
+          const proseEl = lastMsg.querySelector('.markdown-content, div[dir="auto"], div[class*="prose"]');
+
+          let reasoningText = thinkEl ? (thinkEl.textContent || '').trim() : '';
+          let answerText = proseEl ? (proseEl.textContent || '').trim() : (lastMsg.textContent || '').trim();
+          if (thinkEl && answerText.includes(reasoningText)) {
+            answerText = answerText.replace(reasoningText, '').trim();
+          }
+
           return {
             generating: !!stopBtn,
-            text: rawText
+            answerText,
+            reasoningText
           };
         });
       } catch (err: any) {
@@ -374,20 +387,29 @@ class MetaBridgePool {
         throw err;
       }
 
-      if (state.text.length > lastReportedLen) {
-        const delta = state.text.slice(lastReportedLen);
-        lastReportedLen = state.text.length;
-        fullText = state.text;
-        if (options.onChunk) options.onChunk(delta);
+      // Stream reasoning delta if present
+      if (state.reasoningText.length > lastReportedReasoningLen) {
+        const delta = state.reasoningText.slice(lastReportedReasoningLen);
+        lastReportedReasoningLen = state.reasoningText.length;
+        fullReasoning = state.reasoningText;
+        if (options.onChunk) options.onChunk(delta, true);
       }
 
-      if (!state.generating && fullText.length > 0) {
-        if (state.text === fullText) {
+      // Stream answer delta
+      if (state.answerText.length > lastReportedLen) {
+        const delta = state.answerText.slice(lastReportedLen);
+        lastReportedLen = state.answerText.length;
+        fullText = state.answerText;
+        if (options.onChunk) options.onChunk(delta, false);
+      }
+
+      if (!state.generating && (fullText.length > 0 || fullReasoning.length > 0)) {
+        if (state.answerText === fullText) {
           stableRounds++;
           if (stableRounds >= 2) break;
         } else {
           stableRounds = 0;
-          fullText = state.text;
+          fullText = state.answerText;
         }
       }
     }
@@ -404,7 +426,7 @@ class MetaBridgePool {
       await this.persistAccountCookies(session);
     } catch {}
 
-    return { text: fullText, account: session.config };
+    return { text: fullText, reasoning: fullReasoning, account: session.config };
   }
 
   public async getAvailableModels(): Promise<Array<{ id: string; object: string; owned_by: string; description?: string }>> {
@@ -805,13 +827,17 @@ Bun.serve({
               const result = await pool.ask(promptText, {
                 model: requestedModel,
                 accountId: explicitAccountId,
-                onChunk: async (delta) => {
+                onChunk: async (delta, isThinking) => {
                   const chunk = {
                     id,
                     object: 'chat.completion.chunk',
                     created,
                     model: requestedModel || 'meta-ai',
-                    choices: [{ index: 0, delta: { content: delta }, finish_reason: null }]
+                    choices: [{
+                      index: 0,
+                      delta: isThinking ? { reasoning_content: delta } : { content: delta },
+                      finish_reason: null
+                    }]
                   };
                   await safeWrite(`data: ${JSON.stringify(chunk)}\n\n`);
                 }
@@ -864,7 +890,11 @@ Bun.serve({
             choices: [
               {
                 index: 0,
-                message: { role: 'assistant', content: result.text },
+                message: {
+                  role: 'assistant',
+                  content: result.text,
+                  ...(result.reasoning ? { reasoning_content: result.reasoning } : {})
+                },
                 finish_reason: 'stop'
               }
             ],
