@@ -370,13 +370,25 @@ class MetaBridgePool {
           }
           if (!lastMsg) return { generating: !!stopBtn, hasSendBtn: !!sendBtn, answerText: '', reasoningText: '' };
 
-          const thinkEl = lastMsg.querySelector('[class*="thought"], [class*="thinking"], [class*="reasoning"], [data-testid*="thought"], [data-testid*="thinking"], details, summary');
-          
-          let reasoningText = thinkEl ? (thinkEl.textContent || '').trim() : '';
-          let answerText = (lastMsg.textContent || '').trim();
-          if (thinkEl && answerText.includes(reasoningText)) {
-            answerText = answerText.replace(reasoningText, '').trim();
+          // 1. Extract clean reasoning text if thinking container exists
+          const thinkEl = lastMsg.querySelector('[data-testid="thinking-status"], [data-testid*="thought"], [data-testid*="thinking"], [class*="thinking-status"], [class*="thought"], details, summary');
+          let reasoningText = '';
+          if (thinkEl) {
+            const rawThink = ((thinkEl as HTMLElement).innerText || thinkEl.textContent || '').trim();
+            reasoningText = rawThink.replace(/^Show thinking\b/i, '').trim();
           }
+
+          // 2. Extract clean markdown prose content (using innerText to preserve formatting and drop citations/buttons)
+          const proseEl = lastMsg.querySelector('.markdown-content, .ur-markdown, div.prose');
+          let answerText = '';
+          if (proseEl) {
+            answerText = ((proseEl as HTMLElement).innerText || '').trim();
+          } else {
+            answerText = ((lastMsg as HTMLElement).innerText || '').trim();
+          }
+
+          // Strip any residual "Show thinking" or action button text from answerText
+          answerText = answerText.replace(/^Show thinking\s*/i, '').trim();
 
           return {
             generating: !!stopBtn,
