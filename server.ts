@@ -673,6 +673,33 @@ Bun.serve({
 
     // Models endpoint
     if (url.pathname === '/v1/models' || url.pathname === '/models') {
+      // In-Modal Connection Testing Hook for 9Router:
+      const authHeader = req.headers.get('Authorization') || req.headers.get('authorization') || '';
+      if (authHeader.startsWith('Bearer ')) {
+        const probeToken = authHeader.slice(7).trim();
+        if (probeToken && !probeToken.startsWith('***')) {
+          if (probeToken.length < 15) {
+            return Response.json({
+              error: {
+                message: 'Meta AI connection test failed: Token is too short or malformed',
+                type: 'invalid_token',
+                code: 'invalid_api_key'
+              }
+            }, { status: 401, headers: corsHeaders });
+          }
+          const testRes = validateSessionToken(probeToken);
+          if (!testRes.valid) {
+            return Response.json({
+              error: {
+                message: `Meta AI connection test failed: ${testRes.error || 'Token expired or invalid'}`,
+                type: 'invalid_token',
+                code: 'invalid_api_key'
+              }
+            }, { status: 401, headers: corsHeaders });
+          }
+        }
+      }
+
       const models = await pool.getAvailableModels();
       return Response.json({
         object: 'list',
