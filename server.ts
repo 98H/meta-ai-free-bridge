@@ -370,25 +370,31 @@ class MetaBridgePool {
           }
           if (!lastMsg) return { generating: !!stopBtn, hasSendBtn: !!sendBtn, answerText: '', reasoningText: '' };
 
-          // 1. Extract clean reasoning text if thinking container exists
-          const thinkEl = lastMsg.querySelector('[data-testid="thinking-status"], [data-testid*="thought"], [data-testid*="thinking"], [class*="thinking-status"], [class*="thought"], details, summary');
-          let reasoningText = '';
-          if (thinkEl) {
-            const rawThink = ((thinkEl as HTMLElement).innerText || thinkEl.textContent || '').trim();
-            reasoningText = rawThink.replace(/^Show thinking\b/i, '').trim();
-          }
-
-          // 2. Extract clean markdown prose content (using innerText to preserve formatting and drop citations/buttons)
-          const proseEl = lastMsg.querySelector('.markdown-content, .ur-markdown, div.prose');
-          let answerText = '';
-          if (proseEl) {
-            answerText = ((proseEl as HTMLElement).innerText || '').trim();
+          // 1. Extract clean answer content from the message body
+          // The actual reply on meta.ai is inside .mt-4, .ur-markdown, or prose elements
+          const bodyEl = lastMsg.querySelector('.mt-4, .ur-markdown, div.prose');
+          let rawText = '';
+          if (bodyEl) {
+            rawText = ((bodyEl as HTMLElement).innerText || '').trim();
           } else {
-            answerText = ((lastMsg as HTMLElement).innerText || '').trim();
+            rawText = ((lastMsg as HTMLElement).innerText || '').trim();
           }
 
-          // Strip any residual "Show thinking" or action button text from answerText
-          answerText = answerText.replace(/^Show thinking\s*/i, '').trim();
+          // Strip any UI status chips, language pills, and citations
+          rawText = rawText.replace(/^Show thinking\s*/i, '');
+          rawText = rawText.replace(/^Responding in [^\n]+\s*/i, '');
+          rawText = rawText.replace(/Sources\s*$/i, '');
+          let answerText = rawText.trim();
+
+          // 2. Only extract reasoning if there is actual substantive thinking text (not UI status labels)
+          let reasoningText = '';
+          const thinkEl = lastMsg.querySelector('[data-testid="thinking-status"] + div, details[open] > *:not(summary)');
+          if (thinkEl) {
+            const candidate = ((thinkEl as HTMLElement).innerText || '').trim();
+            if (candidate.length > 25 && !/^(show thinking|thinking|responding in)/i.test(candidate)) {
+              reasoningText = candidate;
+            }
+          }
 
           return {
             generating: !!stopBtn,
