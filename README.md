@@ -110,5 +110,20 @@ cd /root/projects/meta-ai-free-bridge
 
 ---
 
+### ⚡ مدیریت چرخه حیات و بازگردانی فوری (Lifecycle & Instant Restoration)
+در صورت نیاز به آزادسازی کامل رم و پردازنده سرور (توقف کامل سرویس‌ها و مرورگرهای پس‌زمینه بدون از دست رفتن نشست‌ها و تنظیمات):
+```bash
+/root/projects/disable-all-bridges.sh
+```
+
+جهت بازگردانی فوری، بدون نقص و بلادرنگ این بریج در آینده (ثبت مجدد در دیتابیس ۹Router، فعال‌سازی سرویس systemd و اعتبارسنجی سلامت):
+```bash
+/root/projects/restore-all-bridges.sh --bridge meta
+# یا بازگردانی همزمان تمامی وب‌بریج‌ها:
+/root/projects/restore-all-bridges.sh
+```
+
+---
+
 ## 📄 لایسنس
 توسعه‌یافته به صورت کاملاً متن‌باز و تحت مجوز MIT.
